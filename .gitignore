@@ -1,0 +1,58 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# === 套件部署 / 打包 ===
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === 虛擬環境 ===
+.venv/
+venv/
+ENV/
+env/
+
+# === 測試 / 覆蓋率 ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# === 資料庫 / 本機資料 ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === 機敏設定檔 ===
+.env
+.env.*
+!.env.example
+
+# === IDE / 作業系統 ===
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# === 專案專屬：含學號／姓名的個人檔案（不推送到 GitHub）===
+*41218130*.jpg
+*41218130*.zip

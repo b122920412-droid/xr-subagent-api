@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XR 場景物件管理</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0b1020; font-family: "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif; }
+    canvas { display: block; }
+
+    #hud {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 20;
+      pointer-events: none;
+      min-width: 240px;
+      max-width: 360px;
+      padding: 12px 16px;
+      color: #eaf2ff;
+      background: rgba(10, 18, 40, 0.78);
+      border: 1px solid rgba(120, 170, 255, 0.45);
+      border-radius: 10px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(6px);
+      line-height: 1.55;
+      font-size: 13px;
+    }
+    #hud h1 { margin: 0 0 6px 0; font-size: 18px; letter-spacing: 0.5px; color: #8fc0ff; }
+    #hud .row { display: flex; justify-content: space-between; gap: 16px; }
+    #hud .label { color: #9fb4d8; }
+    #hud .value { font-weight: 600; }
+    #hud .status { margin-top: 6px; font-size: 12px; color: #79e6a8; }
+    #hud .status.error { color: #ff9b9b; white-space: pre-wrap; word-break: break-word; }
+
+    #fatal {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(8, 12, 28, 0.94);
+      color: #ffe9e9;
+      text-align: center;
+    }
+    #fatal .box {
+      max-width: 560px;
+      padding: 28px 32px;
+      border: 1px solid rgba(255, 140, 140, 0.5);
+      border-radius: 12px;
+      background: rgba(60, 20, 28, 0.55);
+      line-height: 1.7;
+    }
+    #fatal h2 { margin: 0 0 10px; color: #ff9b9b; }
+    #fatal code { color: #ffd6a5; word-break: break-all; }
+  </style>
+
+  <!-- CDN 載入失敗的友善提示（module 匯入失敗不會触发 window.onerror，故搭配逾時檢查） -->
+  <script>
+    window.__xrReady = false;
+    function showFatal(message) {
+      if (window.__xrReady) return;
+      var box = document.getElementById('fatal');
+      if (!box) return;
+      var detail = document.getElementById('fatal-detail');
+      if (detail && message) detail.textContent = message;
+      box.style.display = 'flex';
+    }
+    window.addEventListener('error', function (e) {
+      showFatal((e && e.message) ? e.message : '資源載入失敗');
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) {
+      showFatal((e && e.reason && e.reason.message) ? e.reason.message : '非同步載入失敗');
+    });
+    window.setTimeout(function () {
+      if (!window.__xrReady) {
+        showFatal('無法從 CDN 載入 Three.js，請檢查網路連線（unpkg.com）後重新整理頁面。');
+      }
+    }, 12000);
+  </script>
+
+  <!-- Three.js ES module + importmap（單檔，無需打包工具） -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <h1>XR 場景物件管理</h1>
+    <div class="row"><span class="label">物件數量：</span><span class="value" id="count">0</span></div>
+    <div class="row"><span class="label">最後更新：</span><span class="value" id="last-update">--</span></div>
+    <div class="status" id="status">連線中…</div>
+  </div>
+
+  <div id="fatal">
+    <div class="box">
+      <h2>⚠ 場景無法載入</h2>
+      <p>此頁面需要從 CDN 載入 Three.js。請確認網路可連線至 <code>unpkg.com</code>，然後重新整理頁面。</p>
+      <p id="fatal-detail"></p>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+    // ---------- HUD ----------
+    const countEl = document.getElementById('count');
+    const lastEl = document.getElementById('last-update');
+    const statusEl = document.getElementById('status');
+
+    function setStatus(message, isError) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle('error', !!isError);
+    }
+    function clearError() { setStatus('● 已同步（每 3 秒更新）', false); }
+    function showError(message) { setStatus('✖ ' + message, true); }
+
+    // ---------- 場景 / 相機 / 渲染器 ----------
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b1020);
+    scene.fog = new THREE.Fog(0x0b1020, 25, 70);
+
+    const camera = new THREE.PerspectiveCamera(
+      70, window.innerWidth / window.innerHeight, 0.1, 1000
+    );
+    camera.position.set(6, 5, 9);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;              // 啟用 WebXR
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.target.set(0, 0.6, 0);
+    controls.update();
+
+    // 環境光 + 方向光
+    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.15);
+    dirLight.position.set(6, 12, 8);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.set(1024, 1024);
+    dirLight.shadow.camera.left = -20;
+    dirLight.shadow.camera.right = 20;
+    dirLight.shadow.camera.top = 20;
+    dirLight.shadow.camera.bottom = -20;
+    scene.add(dirLight);
+
+    // 地面 GridHelper + 陰影接收面
+    const grid = new THREE.GridHelper(40, 40, 0x4c8dff, 0x24345c);
+    grid.position.y = 0;
+    scene.add(grid);
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40),
+      new THREE.ShadowMaterial({ opacity: 0.3 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // WebXR 可用時顯示 VRButton
+    if (navigator.xr && navigator.xr.isSessionSupported) {
+      navigator.xr.isSessionSupported('immersive-vr').then(function (supported) {
+        if (supported) document.body.appendChild(VRButton.createButton(renderer));
+      }).catch(function () { /* 不支援時安靜略過 */ });
+    }
+
+    // ---------- 名稱標籤（canvas →貼圖→ Sprite） ----------
+    function makeLabel(text, color) {
+      const fontSize = 64;
+      const padX = 28;
+      const padY = 18;
+      const font = 'bold ' + fontSize + 'px "Microsoft JhengHei", "Noto Sans TC", sans-serif';
+
+      const measure = document.createElement('canvas').getContext('2d');
+      measure.font = font;
+      const textWidth = Math.ceil(measure.measureText(text).width);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = textWidth + padX * 2;
+      canvas.height = fontSize + padY * 2;
+
+      const ctx = canvas.getContext('2d');
+      ctx.font = font;                        // 調整尺寸後 context 會重置，須重設字型
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // 圓角背景 + 邊框（讓字更清晰）
+      const r = 20;
+      const w = canvas.width, h = canvas.height;
+      ctx.beginPath();
+      ctx.moveTo(r, 0);
+      ctx.arcTo(w, 0, w, h, r);
+      ctx.arcTo(w, h, 0, h, r);
+      ctx.arcTo(0, h, 0, 0, r);
+      ctx.arcTo(0, 0, w, 0, r);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(8, 14, 32, 0.82)';
+      ctx.fill();
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#' + color.getHexString();
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, w / 2, h / 2 + 2);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+      const material = new THREE.SpriteMaterial({
+        map: texture, transparent: true, depthTest: false, depthWrite: false
+      });
+      const sprite = new THREE.Sprite(material);
+      const labelHeight = 0.55;               // 世界單位中的標籤高度
+      sprite.scale.set(labelHeight * (w / h), labelHeight, 1);
+      sprite.renderOrder = 999;
+      return sprite;
+    }
+
+    function colorFor(obj) {
+      let hash = 0;
+      const key = String(obj.name || '') + '#' + obj.id;
+      for (let i = 0; i < key.length; i++) {
+        hash = (hash << 5) - hash + key.charCodeAt(i);
+        hash |= 0;
+      }
+      const hue = ((Math.abs(hash) % 360) / 360);
+      return new THREE.Color().setHSL(hue, 0.62, 0.55);
+    }
+
+    // ---------- 物件同步（以 id 比對，避免重複建立 / memory leak） ----------
+    const objects = new Map(); // id -> { mesh, sprite, name }
+
+    function applyTransform(mesh, obj) {
+      mesh.position.set(...obj.position);      // 規格：世界座標
+      mesh.rotation.set(...obj.rotation);      // 規格：弧度，直接套用
+      mesh.scale.set(...obj.scale);            // 規格：每元素 > 0
+    }
+
+    function placeLabel(sprite, obj) {
+      // 置於物件上方（y + 1.5，並隨 scale 墊高以免被方塊遮住）
+      sprite.position.set(
+        obj.position[0],
+        obj.position[1] + 1.5 * obj.scale[1],
+        obj.position[2]
+      );
+    }
+
+    function createRecord(obj) {
+      const color = colorFor(obj);
+
+      const geometry = new THREE.BoxGeometry(1, 1, 1);
+      const material = new THREE.MeshStandardMaterial({
+        color: color, roughness: 0.45, metalness: 0.12
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      applyTransform(mesh, obj);
+
+      // 邊框（跟隨 mesh transform）
+      const edgeGeom = new THREE.EdgesGeometry(geometry);
+      const edgeMat = new THREE.LineBasicMaterial({ color: 0x0a0f1e });
+      mesh.add(new THREE.LineSegments(edgeGeom, edgeMat));
+
+      const sprite = makeLabel(obj.name, color);
+      placeLabel(sprite, obj);
+
+      scene.add(mesh);
+      scene.add(sprite);
+      return { mesh: mesh, sprite: sprite, name: obj.name, color: color };
+    }
+
+    function disposeSprite(sprite) {
+      if (!sprite) return;
+      scene.remove(sprite);
+      if (sprite.material.map) sprite.material.map.dispose();
+      sprite.material.dispose();
+    }
+
+    function disposeRecord(rec) {
+      scene.remove(rec.mesh);
+      rec.mesh.children.forEach(function (child) {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+      rec.mesh.geometry.dispose();
+      rec.mesh.material.dispose();
+      disposeSprite(rec.sprite);
+    }
+
+    function syncObjects(list) {
+      const seen = new Set();
+
+      for (const obj of list) {
+        seen.add(obj.id);
+        let rec = objects.get(obj.id);
+        if (!rec) {
+          objects.set(obj.id, createRecord(obj));
+          continue;
+        }
+        // 既有物件：更新 transform（與名稱／顏色，若變更）
+        applyTransform(rec.mesh, obj);
+        placeLabel(rec.sprite, obj);
+        if (rec.name !== obj.name) {
+          disposeSprite(rec.sprite);
+          rec.color = colorFor(obj);
+          rec.name = obj.name;
+          rec.mesh.material.color.copy(rec.color);
+          rec.sprite = makeLabel(obj.name, rec.color);
+          placeLabel(rec.sprite, obj);
+          scene.add(rec.sprite);
+        }
+      }
+
+      // 移除已刪除物件並釋放 GPU 資源
+      for (const [id, rec] of objects.entries()) {
+        if (!seen.has(id)) {
+          disposeRecord(rec);
+          objects.delete(id);
+        }
+      }
+
+      countEl.textContent = String(objects.size);
+    }
+
+    // ---------- 每 3 秒輪詢 /objects ----------
+    async function poll() {
+      try {
+        const res = await fetch('/objects', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!Array.isArray(data)) throw new Error('回應格式錯誤');
+        syncObjects(data);
+        clearError();
+        lastEl.textContent = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+      } catch (err) {
+        showError('API 錯誤：' + (err && err.message ? err.message : err));
+      }
+    }
+    poll();
+    setInterval(poll, 3000);
+
+    // ---------- 持續渲染（setAnimationLoop 同時支援一般 RAF 與 XR session） ----------
+    renderer.setAnimationLoop(function () {
+      controls.update();
+      renderer.render(scene, camera);
+    });
+
+    window.addEventListener('resize', function () {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // 告訴外層腳本：Three.js 已成功載入並初始化
+    window.__xrReady = true;
+  </script>
+</body>
+</html>
